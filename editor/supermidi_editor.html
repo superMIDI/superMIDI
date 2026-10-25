@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>superMIDI editor</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--line:#d8d8d8;--acc:#2563eb;--ok:#15803d;--bad:#b91c1c}
+@media(prefers-color-scheme:dark){:root{--bg:#161616;--fg:#eee;--mut:#9a9a9a;--line:#333;--acc:#60a5fa;--ok:#4ade80;--bad:#f87171}}
+body{font:15px system-ui,sans-serif;background:var(--bg);color:var(--fg);margin:0 auto;padding:16px;max-width:760px}
+h1{font-size:1.25rem;margin:0 0 4px}.mut{color:var(--mut)}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}
+button,select,input{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 10px}
+button{cursor:pointer}button.on{background:var(--acc);border-color:var(--acc);color:#fff}button:disabled{opacity:.4;cursor:default}
+#tw{overflow-x:auto}table{border-collapse:collapse;width:100%;min-width:640px}td,th{border-bottom:1px solid var(--line);padding:4px 6px;text-align:left}
+input[type=number]{width:4.5em}.ro{opacity:.45;pointer-events:none}
+#log{font:13px ui-monospace,monospace;white-space:pre-wrap;max-height:9em;overflow:auto;border:1px solid var(--line);border-radius:6px;padding:8px}
+.ok{color:var(--ok)}.bad{color:var(--bad)}
+</style></head><body>
+<h1>superMIDI editor</h1>
+<div class="mut">Edits the profile CCs of the superMIDI firmware over USB MIDI (channel 16, no SysEx). Chrome or Edge. Needs superMIDI 1.0.0. Edits are live at once; "Save to unit" keeps them across power-off.</div>
+<div class="row"><button id="conn">Connect</button>
+<label>Out <select id="out"></select></label><label>In <select id="inp"></select></label></div>
+<div class="row"><span>Layer</span><span id="layers"></span><span>Profile</span><span id="profs"></span></div>
+<div id="note" class="mut"></div>
+<div id="tw"><table><thead><tr><th>Knob</th><th>Channel</th><th>CC</th><th>Range</th><th>Mode</th><th>Accel</th></tr></thead><tbody id="rows"></tbody></table></div>
+<div class="row"><button id="send">Send this set</button><button id="read">Read this set</button>
+<button id="sendall">Send all</button><button id="readall">Read all</button>
+<button id="savef">Save to unit</button><button id="forget">Forget saved</button><button id="exp">Export</button><label class="mut">Import <input type="file" id="imp" accept=".json"></label></div>
+<div id="log"></div>
+<script>
+/* ---- protocol: Control Change on channel 16, see supermidi-protocol.md ---- */
+const ST=['OK','wrong checksum','no such set','read-only (stock profile)','bad data','wrong length','not used','busy, try again','flash error'];
+const blank=()=>({m:'auto',cc:0,rg:0,mn:0,mx:127,md:'',ac:''}); /* md, ac: '' = stock setting */
+const sets=Array.from({length:8},()=>Array.from({length:16},blank));
+const norm=a=>{if(!Array.isArray(a)||a.length!=8||a.some(x=>!Array.isArray(x)||x.length!=16))throw 0;return a.map(x=>x.map(s=>({...blank(),...s})))};
+const enc=i=>sets[i].flatMap(s=>{const a=s.m=='auto';return[a?127:s.m=='keep'?126:+s.m,a?0:s.cc&127,s.rg?s.mn:0,s.rg?s.mx:0,s.md===''?0:+s.md,s.ac===''?0:+s.ac,(s.rg?1:0)|(s.md===''?0:2)|(s.ac===''?0:4)]});
+const chk=(i,d)=>(i+d.reduce((a,b)=>a+b,0))&127;
+function dec(i,d){for(let k=0;k<16;k++){const[a,b,mn,mx,md,ac,f]=d.slice(7*k,7*k+7);sets[i][k]={m:a==127?'auto':a==126?'keep':String(a),cc:a==127?0:b,rg:f&1,mn:f&1?mn:0,mx:f&1?mx:127,md:f&2?String(md):'',ac:f&4?String(ac):''}}}
+/* ---- the page ---- */
+const $=s=>document.querySelector(s);let out=null,inp=null,layer=0,prof=1,rx=null,last=-1,what='',waiter=null;
+const done=v=>{if(waiter){const w=waiter;waiter=null;w(v)}};
+const status=ms=>new Promise(r=>{waiter=r;setTimeout(()=>{if(waiter===r){waiter=null;r(-1)}},ms)});
+try{norm(JSON.parse(localStorage.getItem('smc')||'null')).forEach((x,i)=>sets[i]=x)}catch(e){}
+const save=()=>{try{localStorage.setItem('smc',JSON.stringify(sets))}catch(e){}};
+const id=()=>layer*4+prof-1;
+function log(t,c){const l=$('#log');l.insertAdjacentHTML('beforeend',`<div class="${c||''}">${t}</div>`);l.scrollTop=l.scrollHeight}
+function send(msgs){if(!out)return log('Connect first','bad');let t=performance.now();for(const m of msgs){out.send([0xBF,m[0],m[1]],t);t+=3}}
+function sendSet(i){if(!out){log('Connect first','bad');return Promise.resolve(-3)}const bad=sets[i].findIndex(s=>s.rg&&s.mn>s.mx);if(bad>=0){log(`Knob ${bad+1}: minimum is above maximum`,'bad');return Promise.resolve(-2)}last=i;what=names(i);const d=enc(i);send([[0x69,i],...d.map(v=>[0x68,v]),[0x6a,chk(i,d)]]);return status(2500)}
+const readSet=i=>{if(!out){log('Connect first','bad');return Promise.resolve(-3)}last=i;what='read '+names(i);send([[0x6c,i]]);return status(3000)};
+function onmsg(e){const[s,c,v]=e.data;if(s!=0xBF)return;
+ if(c==0x6b){log(`${what}: ${ST[v]||v}`,v?'bad':'ok');done(v)}
+ else if(c==0x69)rx={i:v,d:[]};else if(c==0x68&&rx)rx.d.push(v);
+ else if(c==0x6a&&rx){if(rx.d.length==112&&chk(rx.i,rx.d)==v){dec(rx.i,rx.d);save();log(`read ${names(rx.i)}`,'ok');draw();done(0)}else{log('read failed (lost or wrong data)','bad');done(-1)}rx=null}}
+const names=i=>(i<4?'plain':'Shift')+' profile '+(i%4+1);
+function ports(){if(!midi)return;const f=(m,el)=>{el.innerHTML='';for(const p of m.values())el.add(new Option(p.name,p.id));
+ const b=[...el.options].findIndex(o=>/beatstep/i.test(o.text));if(b>=0)el.selectedIndex=b};
+ f(midi.outputs,$('#out'));f(midi.inputs,$('#inp'));pick()}
+function pick(){out=midi.outputs.get($('#out').value)||null;if(inp)inp.onmidimessage=null;inp=midi.inputs.get($('#inp').value)||null;if(inp)inp.onmidimessage=onmsg}
+let midi=null;
+$('#conn').onclick=async()=>{try{midi=await navigator.requestMIDIAccess();midi.onstatechange=ports;ports();log('Connected','ok')}catch(e){log('No MIDI access: '+e.message,'bad')}};
+$('#out').onchange=$('#inp').onchange=()=>midi&&pick();
+function tabs(){const b=(el,n,on,fn,dis)=>{el.innerHTML='';n.forEach(([t,v])=>{const x=document.createElement('button');x.textContent=t;x.className=on(v)?'on':'';x.onclick=()=>fn(v);el.append(x)})};
+ b($('#layers'),[['Plain',0],['Shift',1]],v=>v==layer,v=>{layer=v;draw()});b($('#profs'),[1,2,3,4].map(n=>['Profile '+n,n]),v=>v==prof,v=>{prof=v;draw()})}
+function draw(){tabs();const ro=id()==0;$('#note').textContent=ro?'Profile 1 on the plain layer is the stock setup: edit it in MIDI Control Center.':
+ 'Auto = stock CC +16 per profile (+64 on the Shift layer). "Stock channel" keeps the stock channel. Range, Mode and Accel follow the stock setup unless set (range does nothing in relative modes). Knob n pairs with n+8 (profile buttons 2n-1 and 2n).';
+ const rows=$('#rows');rows.innerHTML='';rows.className=ro?'ro':'';
+ sets[id()].forEach((s,k)=>{const tr=document.createElement('tr');
+  const opts=['<option value="auto">Auto</option><option value="keep">Stock channel</option>'].concat([...Array(16)].map((_,c)=>`<option value="${c}">${c+1}</option>`)).join('');
+  const mo=['','Stock','0','Absolute','1','Relative 1 (64+step)','2','Relative 2 (two\'s compl.)','3','Relative 3 (16+step)'],ao=['','Stock','0','Off','1','Low','2','Medium','3','High','4','Global'];
+  const op=a=>a.map((v,i)=>i%2?'':`<option value="${v}">${a[i+1]}</option>`).join('');
+  tr.innerHTML=`<td>Knob ${k+1}</td><td><select>${opts}</select></td><td><input type="number" min="0" max="127"></td><td><input type="checkbox"> <input type="number" min="0" max="127"> <input type="number" min="0" max="127"></td><td><select>${op(mo)}</select></td><td><select>${op(ao)}</select></td>`;
+  const[sel,smd,sac]=tr.querySelectorAll('select');
+  const ins=tr.querySelectorAll('input'),cc=ins[0],cb=ins[1],lo=ins[2],hi=ins[3];
+  const sync=()=>{cc.disabled=s.m=='auto';lo.disabled=hi.disabled=!s.rg;save()};
+  sel.value=s.m;cc.value=s.cc;cb.checked=!!s.rg;lo.value=s.mn;hi.value=s.mx;smd.value=s.md;sac.value=s.ac;sync();
+  const n=v=>Math.max(0,Math.min(127,+v||0));
+  sel.onchange=()=>{s.m=sel.value;sync()};cc.oninput=()=>{s.cc=n(cc.value);save()};cb.onchange=()=>{s.rg=cb.checked?1:0;sync()};
+  lo.oninput=()=>{s.mn=n(lo.value);save()};hi.oninput=()=>{s.mx=n(hi.value);save()};
+  smd.onchange=()=>{s.md=smd.value;save()};sac.onchange=()=>{s.ac=sac.value;save()};rows.append(tr)})}
+$('#send').onclick=()=>sendSet(id());$('#read').onclick=()=>readSet(id());
+$('#sendall').onclick=async()=>{for(let i=1;i<8;i++){if(await sendSet(i)!==0){log('Stopped at set '+(i+1),'bad');return}}log('All sets sent','ok')};   /* one set at a time: wait for each answer */
+$('#readall').onclick=async()=>{for(let i=1;i<8;i++){if(await readSet(i)!==0){log('Stopped at set '+(i+1),'bad');return}}log('All sets read','ok')};
+$('#savef').onclick=()=>{if(!out)return log('Connect first','bad');what='Save to unit';send([[0x6d,0x2a]])};
+$('#forget').onclick=()=>{if(!out)return log('Connect first','bad');if(confirm('Erase the saved profiles from the unit?')){what='Forget saved';send([[0x6d,0x2b]])}};
+$('#exp').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(sets)],{type:'application/json'}));a.download='supermidi-profiles.json';a.click()};
+$('#imp').onchange=async e=>{try{norm(JSON.parse(await e.target.files[0].text())).forEach((x,i)=>sets[i]=x);save();draw();log('Imported','ok')}catch(x){log('Not a profiles file','bad')}};
+draw();
+</script></body></html>
