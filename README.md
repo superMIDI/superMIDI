@@ -1,3 +1,4 @@
+
 # superMIDI controller
 
 An unofficial add-on for the **Arturia BeatStep Pro**, firmware **2.0.1.6**. It extends the
@@ -5,6 +6,8 @@ MIDI controller mode: four switchable profiles for every pair of knobs, a second
 knob messages on Shift, and a small editor page to set them up. Not made or supported by
 Arturia. Arturia and BeatStep Pro are trademarks of their owners. No Arturia material is
 in this repository: you supply your own copy of Arturia's update file.
+
+<img width="1536" height="1024" alt="file_000000007c1c81f58903699ad91fcc67" src="https://github.com/user-attachments/assets/3576dc37-abd9-4bbd-a82c-de940b8d6d3f" />
 
 ## What it adds
 
